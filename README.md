@@ -1,195 +1,202 @@
-#  vector-com — High-Performance Multi-Client Communication Server
+# Vectorcom — Multi-Client Communication System
 
-**A production-style TCP communication server and client in C++**, built from the ground up with concurrency, encryption, and real-time multi-room chat. No frameworks—just sockets, threads, and systems programming.
+Vectorcom is a multi-client chat system. The networking core is written in C++ all user interface now lives in a modern Rust **TUI** built with [ratatui](https://ratatui.rs/).
 
----
+The C++ programs are **headless backends** and the Rust TUI is the **only UI**:
 
-## Why this project?
+```text
+                 XOR line protocol (TCP)
+  Rust client TUI  ───────────────────────►  C++ backend server
+   (vectorcom)                                  (vector-com)
+                                                     ▲
+                                                     │  
+                                              Rust dashboard TUI
+                                          (vectorcom-server --observe)
+```
 
-Opticom showcases **systems programming**, **concurrent server design**, and **low-level networking** in C++. It’s the kind of project that demonstrates you can:
-
-- Design and implement a **multi-threaded TCP server** with thread-safe client management
-- Handle **multiple clients** using POSIX threads and mutex-based synchronization
-- Implement **real-time features** (rooms, private messages, broadcast) with clear protocols
-- Add **security-oriented features** (message encryption, user blocking, rate limiting)
-- Build a **usable CLI client** with a clean, colorized terminal UI
-
-Ideal for roles in **backend systems**, **distributed systems**, **networking**, or **C++/systems development**.
-
----
-
-## Tech stack
-
-| Area | Technologies |
-|------|--------------|
-| **Language** | C++17, Rust |
-| **Networking** | TCP sockets (POSIX), client–server architecture |
-| **Concurrency** | POSIX threads (pthreads), `std::mutex`, lock guards |
-| **Platform** | Linux, macOS (Unix/POSIX) |
-| **Build** | Make, g++/clang++ |
-
----
-
-## Highlights
-
-- **Multi-client server** — Thread-per-client model; handles many simultaneous connections
-- **Thread-safe design** — Mutex-protected shared state; safe add/remove of clients
-- **Chat features** — Rooms, private messages, pinned messages, persistent history per room
-- **Security** — XOR-based message encryption in transit, user blocking, rate limiting (e.g. 3 msg/s), room slowmode
-- **Admin tooling** — In-process admin console: kick users, broadcast, set room slowmode
-- **Robustness** — Signal handling (SIGINT/SIGTERM), graceful shutdown, configurable port
-- **Cross-platform** — Builds and runs on Linux and macOS; run on Windows via WSL or a Linux VM
-
----
+The Rust binaries are **wire-compatible** with the C++ backend, so they speak the exact same protocol.
 
 ## Quick start
 
+Two commands — each builds everything and launches both the backend and its TUI:
+
 ```bash
-# Build server and client
-make
-
-# Terminal 1: start server (default port 8080)
-./opticom
-
-# Terminal 2 & 3: connect clients
-./client
-# Or: ./client <host> <port>
+make server   # build + run the C++ backend AND the Rust dashboard TUI
+make client   # build + run the Rust client TUI
 ```
 
-**Try it:** Start the server, open 2+ clients, type in one—messages appear in the others. Use `/join <room>`, `/pm <user> <msg>`, `/block <user>`, and see the [Client commands](#client-commands) below.
+Override host / port / username on the command line:
 
----
+```bash
+make server PORT=9090
+make client HOST=192.168.1.10 PORT=9090 USER=alice
+```
 
-## In Action
-
-**Server console** — Admin view with colored logs, user list, and room activity:
-
-![Server](images/server.png)
-
-**Client** — Colorized chat UI with rooms, private messages, and commands:
-
-![Client](images/client.png)
-
----
-## Project structure
-## Architecture 
-
-- **TCP sockets** for reliable communication
-- **POSIX threads** for one thread per connected client
-- **Mutex locks** for thread-safe client list and shared state
-- **Signal handling** for graceful shutdown and cleanup
-
-![Opticom architecture](images/Architecture.png)
----
-## Features
-
-### Core
-
-- **Multi-client support** — Many clients at once via threading
-- **Real-time messaging** — Broadcast and room-based delivery
-- **Thread-safe** — Mutex-protected client list and shared data
-- **Cross-platform** — Linux, macOS (and Windows via WSL/VM)
-- **Signal handling** — Clean shutdown on Ctrl+C
-- **Configurable port** — Run on any available port
-
-### Security
-
-- **Message encryption** — XOR-based encryption between client and server
-- **User blocking** — Block/unblock users; blocked users can’t PM you
-- **Rate limiting** — Spam protection (e.g. 3 messages per second)
-- **Room slowmode** — Admin-controlled cooldown per room
-
-### Chat
-
-- **Rooms** — Create and join rooms; messages scoped to room
-- **Private messages** — Direct messages to a user
-- **Message history** — Persistent per-room history saved to files
-- **Pinned messages** — Pin messages to room boards; view with `/pins`
-- **User list** — See online users and their rooms
-
-### Server administration
-
-- **Admin console** — Commands in the server process
-- **User management** — Kick users, broadcast server messages
-- **Room management** — Set slowmode per room
-- **Logging** — Color-coded server logs for monitoring
-
----
-
-## Building & running
+`make server` runs the C++ backend headless in the background and attaches the Rust dashboard to it as the live UI; when you quit the dashboard, the backend is stopped.
 
 ### Prerequisites
 
-- C++17 compiler (g++, clang++)
-- POSIX environment (Linux, macOS)
-- Make
+* A C++17 compiler (`g++` or `clang++`) on a POSIX system (Linux, macOS)
+* [Rust](https://rustup.rs/) 1.75+ (stable) and `cargo`
+* `make`
 
-### Build
+## Features
 
-```bash
-make              # Server + client
-make opticom      # Server only
-make client       # Client only
-make debug        # Debug build
-make clean        # Clean artifacts
+### Chat
+* **Multi-client** real-time messaging over TCP (thread-per-client on the backend)
+* **Rooms** — create and join chat rooms with persistent per-room history
+* **Private messages** — direct messages between users
+* **Pinned messages** — pin important messages to a room board
+* **User list** — see who's online and which room they're in
+
+### Security
+* **XOR message encryption** between clients and the backend (shared key)
+* **User blocking** — block/unblock users; blocked users can't reach you (including PMs)
+* **Rate limiting** — spam protection (3 messages/second)
+* **Room slowmode** — admin-controlled per-room message cooldown
+
+### Operations
+* **Headless C++ backend** — plain-text status logs to stdout, no terminal decoration
+* **Admin console** — control the backend from its stdin (`kick`, `say`, `slowmode`, `list`, `help`)
+* **Rust dashboard** — live ratatui view of rooms, users, and activity, with a built-in **admin command prompt** that drives the backend over the wire (`kick`, `say`, `slowmode`)
+
+## Components
+
+| Path | Role |
+|------|------|
+| [cpp-server/vector-com.cpp](cpp-server/vector-com.cpp) | C++ backend chat server (headless; admin console on stdin) |
+| [cpp-server/client.cpp](cpp-server/client.cpp) | C++ headless protocol relay (no UI) — optional standalone client / engine |
+| [rust-tui/](rust-tui/) | Rust workspace: the TUI client and the dashboard server |
+
+### Rust workspace
+
+```text
+rust-tui/
+├── shared/   # protocol constants + XOR helpers shared by both crates
+├── server/   # tokio TCP server + ratatui dashboard + --observe mode
+└── client/   # tokio TCP client + ratatui chat UI with auto-reconnect
 ```
 
-### Run
+Binaries:
+* `vectorcom` — the chat **client TUI** (rounded input box, color-coded users, scrollback, slash commands, graceful reconnect).
+* `vectorcom-server` — a chat **server with a dashboard**, plus an `--observe HOST:PORT` mode that attaches read-only to a running C++ backend (this is what `make server` uses).
+
+## Running pieces individually
+
+You normally just use `make server` / `make client`, but the parts can be run on their own.
+
+### C++ backend
 
 ```bash
-./opticom           # Server on port 8080
-./opticom 9090      # Server on port 9090
-./client            # Client → localhost:8080
-./client 192.168.1.100 8080   # Client → specific host:port
+g++ -std=c++17 -O2 -pthread -o vector-com cpp-server/vector-com.cpp
+./vector-com            # default port 8080
+./vector-com 9090       # custom port
 ```
 
----
+The backend logs plain status lines to stdout and reads **admin commands** from stdin:
+
+* `list` — show connected users with IPs and rooms
+* `kick <username>` — disconnect a user
+* `say <message>` — broadcast to the general room
+* `slowmode <room> <seconds>` — set per-room slowmode
+* `help` — show admin commands
+
+### Rust dashboard / client
+
+```bash
+cd rust-tui && cargo build --release
+
+# dashboard attached to a running C++ backend
+cargo run --release -p vectorcom-server -- --observe 127.0.0.1:8080
+
+# standalone Rust server with dashboard (alternative to the C++ backend)
+cargo run --release -p vectorcom-server -- --port 8080
+
+# client TUI
+cargo run --release -p vectorcom-client -- --host 127.0.0.1 --port 8080 -u alice
+```
+
+The dashboard's `rooms` and `users` panels are reconstructed by polling the
+backend's `/list` and `/rooms` replies. Its **admin prompt** (bottom of the
+screen) lets you type commands that are relayed to the backend:
+
+| Command | Action |
+|---------|--------|
+| `kick <user>` | disconnect a user |
+| `say <message>` | broadcast a server notice to the general room |
+| `slowmode <room> <seconds>` | set per-room slowmode |
+
+`Enter` runs the command, `Esc` clears the prompt (or quits when empty), `Ctrl-C` quits.
+Admin commands travel as `/admin <cmd>` over the socket and are **unauthenticated** —
+intended for a trusted local operator, consistent with this project's educational scope.
+(Against a standalone Rust server, only `say` is supported.)
+
+### C++ headless relay (optional)
+
+[cpp-server/client.cpp](cpp-server/client.cpp) is a UI-less bridge: stdin lines are encrypted to the server, server output is decrypted to stdout verbatim. Useful for scripting or as a minimal reference client.
+
+```bash
+g++ -std=c++17 -O2 -pthread -o client cpp-server/client.cpp
+./client 8080                       # local; username read from first stdin line
+./client 192.168.1.100 8080 alice   # remote; explicit username
+```
 
 ## Client commands
 
-| Command | Description |
-|--------|-------------|
-| `/help` | Show all commands |
-| `/list` | Online users and their rooms |
-| `/rooms` | Active rooms and user counts |
-| `/join <room>` | Join or create a room |
-| `/pm <user> <msg>` | Private message |
-| `/pin <message>` | Pin message in current room |
-| `/pins` | Show pinned messages |
-| `/block <user>` | Block a user |
-| `/unblock <user>` | Unblock |
-| `/blocklist` | List blocked users |
-| `/quit` | Disconnect |
+Type these in the Rust client TUI (most are handled by the backend):
 
----
+| Command | Action |
+|---------|--------|
+| `/help` | show available commands |
+| `/list` | list online users and their rooms |
+| `/rooms` | list active rooms |
+| `/join <room>` | join or create a room |
+| `/pm <user> <message>` | send a private message |
+| `/pin <message>` | pin a message to the room board |
+| `/pins` | view pinned messages |
+| `/unpin <index>` | remove a pinned message |
+| `/block <user>` | block a user |
+| `/unblock <user>` | unblock a user |
+| `/blocklist` | show your blocked users |
+| `/clear` | clear the local view (client-side only) |
+| `/quit` | disconnect |
 
-## Server admin commands
+### Client TUI shortcuts
 
-In the server console:
+| Key | Action |
+|-----|--------|
+| `Enter` | send message / run command |
+| `↑` / `↓` | scroll history |
+| `PageUp` / `PageDown` | scroll history by page |
+| `Ctrl-L` | clear local history |
+| `Esc` / `Ctrl-C` | quit |
 
-| Command | Description |
-|--------|-------------|
-| `list` | Connected users, IPs, rooms |
-| `kick <username>` | Kick user |
-| `say <message>` | Broadcast to general room |
-| `slowmode <room> <seconds>` | Set room slowmode |
-| `help` | Show admin commands |
+## Protocol & security
 
----
+The wire format is **XOR-encrypted, newline-framed plaintext** over TCP:
 
+1. On connect, the client sends its username as the first message.
+2. Each subsequent line is a chat message or a `/command`, XOR-encrypted with the shared key.
+3. The server replies with rendered text lines (also XOR-encrypted).
 
-## Technical notes
+The XOR scheme provides basic obfuscation against casual packet sniffing — it is **educational, not production-grade**. For real deployments, use TLS.
 
-- **Server:** `ChatServer` class, TCP bind/accept, thread-per-client, mutex-protected client list, room and history handling, XOR encryption, blocking and rate limiting.
-- **Client:** TCP connect, send/receive loop, separate receive thread, encrypt/decrypt, colorized terminal UI.
-- **Thread safety:** `std::mutex` and `lock_guard` for client list and shared state.
-- **Encryption:** XOR with shared key (educational; for production consider TLS).
+Blocking is enforced server-side: block lists are stored per client and filtered during both broadcasts and private messages.
 
----
+## Architecture notes
+
+* **Backend:** TCP sockets, POSIX threads (thread-per-client), `std::mutex`-guarded shared state, graceful shutdown on SIGINT/SIGTERM.
+* **Rust side:** async Tokio I/O, ratatui rendering, auto-reconnect on the client; the dashboard observes the backend, polls it for roster/room state, and relays admin commands to it.
+* The C++ backend frames **one message per `recv`** and XOR-encrypts each `send` from key offset 0, so a client should send messages individually rather than batching many lines into a single TCP segment — which is exactly how the interactive TUI behaves. Under heavy bursts, coalesced segments can garble trailing lines; this is a known limitation of the simple framing.
+
+## Running on Windows
+
+Vectorcom targets Unix-like systems. On Windows, use one of:
+
+* **WSL** (recommended): `wsl --install`, then `sudo apt install g++ make` and install Rust via rustup inside Ubuntu. Behaves like native Linux.
+* **VS Code Remote – SSH** into a Linux VM (VirtualBox/VMware), then build and run normally.
+* **MinGW/Cygwin** is possible but requires swapping the POSIX socket headers for Winsock (`winsock2.h`, `WSAStartup()`); a Unix environment is strongly preferred.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
-
----
-
+MIT — see the [LICENSE](LICENSE) file.
