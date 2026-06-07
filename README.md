@@ -1,4 +1,4 @@
-# Hypercom — High-Performance Multi-Client Communication Server
+#  vector-com — High-Performance Multi-Client Communication Server
 
 **A production-style TCP communication server and client in C++**, built from the ground up with concurrency, encryption, and real-time multi-room chat. No frameworks—just sockets, threads, and systems programming.
 
