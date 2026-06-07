@@ -4,15 +4,7 @@ Vectorcom is a multi-client chat system. The networking core is written in C++ a
 
 The C++ programs are **headless backends** and the Rust TUI is the **only UI**:
 
-```text
-                 XOR line protocol (TCP)
-  Rust client TUI  ───────────────────────►  C++ backend server
-   (vectorcom)                                  (vector-com)
-                                                     ▲
-                                                     │  
-                                              Rust dashboard TUI
-                                          (vectorcom-server --observe)
-```
+![Vectorcom architecture](images/architecture.png)
 
 The Rust binaries are **wire-compatible** with the C++ backend, so they speak the exact same protocol.
 
