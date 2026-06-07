@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(g++ -std=c++17 -Wall -Wextra -O2 -pthread -o vector-com vector-com.cpp)",
+      "Bash(g++ -std=c++17 -Wall -Wextra -O2 -pthread -o client client.cpp)",
+      "Bash(clang++ -std=c++17 -Wall -Wextra -O2 -pthread -o vector-com vector-com.cpp)",
+      "Bash(clang++ -std=c++17 -Wall -Wextra -O2 -pthread -o client client.cpp)",
+      "Bash(/bin/sh -c 'g++ --version | head -1')",
+      "Bash(/bin/sh -c 'g++ -std=c++17 -Wall -Wextra -O2 -pthread -o vector-com vector-com.cpp')",
+      "Bash(cargo clippy *)"
+    ]
+  }
+}

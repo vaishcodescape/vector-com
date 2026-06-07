@@ -1,3 +1,10 @@
+// Vector-Com Server with enhanced features and security
+/*Features: - Secure communication with XOR encryption
+            - Room-based chat
+            - User blocking
+            - Slowmode per room
+            - Admin console */
+            
 #include <iostream>
 #include <vector>
 #include <thread>
@@ -20,20 +27,10 @@
 
 using namespace std;
 
-// ANSI Color Codes
-#define COLOR_RESET   "\033[0m"
-#define COLOR_BOLD    "\033[1m"
-#define COLOR_GREEN   "\033[32m"
-#define COLOR_YELLOW  "\033[33m"
-#define COLOR_BLUE    "\033[34m"
-#define COLOR_MAGENTA "\033[35m"
-#define COLOR_CYAN    "\033[36m"
-#define COLOR_RED     "\033[31m"
-
 // Simple XOR encryption/decryption
 namespace Encryption
 {
-    const string KEY = "OpticomSecureKey2025"; // Shared key
+    const string KEY = "VectorcomSecureKey2025"; // Shared key
     
     string encrypt(const string &plaintext)
     {
@@ -108,18 +105,9 @@ public:
             throw runtime_error("Failed to listen on socket");
 
         running = true;
-        
-        // Display startup banner
-        cout << "\n" << COLOR_BOLD << COLOR_CYAN;
-        cout << "================================================\n";
-        cout << "                                                \n";
-        cout << "           " << COLOR_YELLOW << "OPTICOM CHAT SERVER" << COLOR_CYAN << "             \n";
-        cout << "                                                \n";
-        cout << "================================================\n" << COLOR_RESET;
-        cout << COLOR_GREEN << "✓ Server started on port " << port << COLOR_RESET << endl;
-        cout << COLOR_BLUE << " Waiting for clients to connect...\n" << COLOR_RESET;
-        cout << COLOR_MAGENTA << " Admin commands: type 'help' for options\n" << COLOR_RESET;
-        cout << string(50, '-') << "\n" << endl;
+
+        cout << "vectorcom server listening on port " << port << endl;
+        cout << "admin commands available: type 'help' for options" << endl;
 
         thread(&ChatServer::adminConsole, this).detach();
 
@@ -233,22 +221,18 @@ private:
             else if (cmd == "list")
             {
                 lock_guard<mutex> lock(clientsMutex);
-                cout << COLOR_CYAN << "\n╔═══ Connected Users ═══╗" << COLOR_RESET << endl;
+                cout << "Connected users:" << endl;
                 for (auto &c : clients)
-                    cout << COLOR_GREEN << "  • " << COLOR_RESET << c.name 
-                         << COLOR_YELLOW << " (" << c.addr << ")" << COLOR_RESET
-                         << COLOR_BLUE << " room=" << c.room << COLOR_RESET << endl;
-                cout << COLOR_CYAN << "╚═══════════════════════╝\n" << COLOR_RESET << endl;
+                    cout << "  - " << c.name << " (" << c.addr << ") room=" << c.room << endl;
             }
             else if (cmd == "help")
             {
-                cout << COLOR_MAGENTA << "\n╔═══ Admin Commands ═══╗" << COLOR_RESET << endl;
-                cout << COLOR_YELLOW << "  kick <username>" << COLOR_RESET << "       - Kick a user\n";
-                cout << COLOR_YELLOW << "  say <message>" << COLOR_RESET << "         - Broadcast to general room\n";
-                cout << COLOR_YELLOW << "  slowmode <room> <sec>" << COLOR_RESET << " - Set room slowmode\n";
-                cout << COLOR_YELLOW << "  list" << COLOR_RESET << "                  - List online users\n";
-                cout << COLOR_YELLOW << "  help" << COLOR_RESET << "                  - Show this help\n";
-                cout << COLOR_MAGENTA << "╚═══════════════════════╝\n" << COLOR_RESET << endl;
+                cout << "Admin commands:\n";
+                cout << "  kick <username>       - Kick a user\n";
+                cout << "  say <message>         - Broadcast to general room\n";
+                cout << "  slowmode <room> <sec> - Set room slowmode\n";
+                cout << "  list                  - List online users\n";
+                cout << "  help                  - Show this help\n";
             }
         }
     }
@@ -334,7 +318,7 @@ private:
         }
 
         string joinMsg = "[" + nowTimestamp() + "] " + username + " joined the chat (room: general)";
-        cout << COLOR_GREEN << "→ " << COLOR_RESET << joinMsg << endl;
+        cout << joinMsg << endl;
         broadcastMessage(joinMsg, clientSocket, "general");
         saveMessage("general", joinMsg);
         sendRoomHistory(clientSocket, "general");
@@ -350,7 +334,7 @@ private:
                 close(clientSocket);
                 removeClient(clientSocket);
                 string leftMsg = "[" + nowTimestamp() + "] " + username + " left the chat";
-                cout << COLOR_RED << "← " << COLOR_RESET << leftMsg << endl;
+                cout << leftMsg << endl;
                 broadcastMessage(leftMsg, -1, "general");
                 saveMessage("general", leftMsg);
                 break;
@@ -656,6 +640,15 @@ private:
                 continue;
             }
 
+            // Admin controls issued over the socket (used by the Rust dashboard).
+            // Note: unauthenticated — intended for a trusted local operator, in
+            // keeping with this project's educational scope.
+            if (msg.rfind("/admin ", 0) == 0)
+            {
+                handleAdminCommand(msg.substr(7), clientSocket, username);
+                continue;
+            }
+
             if (isRateLimited(clientSocket))
             {
                 string warn = "⚠️ Rate limit exceeded. Slow down!\n";
@@ -707,7 +700,7 @@ private:
             }
 
             string formatted = "[" + nowTimestamp() + "] " + username + ": " + msg;
-            cout << COLOR_BLUE << "💬 " << COLOR_RESET << formatted << endl;
+            cout << formatted << endl;
             broadcastMessage(formatted, clientSocket, getClientRoom(clientSocket));
             saveMessage(getClientRoom(clientSocket), formatted);
         }
@@ -806,6 +799,54 @@ private:
                       clients.end());
     }
 
+    // Execute an admin command (kick/say/slowmode) received over the socket and
+    // reply to the requester. Shares behaviour with the stdin admin console.
+    void handleAdminCommand(const string &cmd, int requesterSocket, const string &requester)
+    {
+        auto reply = [&](const string &s) {
+            string m = s + "\n";
+            sendAll(requesterSocket, m.c_str(), m.size());
+        };
+
+        if (cmd.rfind("kick ", 0) == 0)
+        {
+            string user = cmd.substr(5);
+            kickUser(user);
+            reply("[SERVER] kick requested: " + user);
+        }
+        else if (cmd.rfind("say ", 0) == 0)
+        {
+            string notice = "[SERVER] " + cmd.substr(4);
+            broadcastMessage(notice, -1, "general");
+            reply("[SERVER] broadcast sent to general");
+        }
+        else if (cmd.rfind("slowmode ", 0) == 0)
+        {
+            istringstream iss(cmd.substr(9));
+            string room;
+            int seconds = 0;
+            if (iss >> room >> seconds)
+            {
+                {
+                    lock_guard<mutex> lock(clientsMutex);
+                    roomSlowmodeSeconds[room] = max(0, seconds);
+                }
+                string notice = "[SERVER] Slowmode for room '" + room + "' set to " + to_string(seconds) + "s";
+                broadcastMessage(notice, -1, room);
+                reply(notice);
+            }
+            else
+            {
+                reply("Usage: slowmode <room> <seconds>");
+            }
+        }
+        else
+        {
+            reply("Unknown admin command. Try: kick <user> | say <msg> | slowmode <room> <secs>");
+        }
+        cout << "[admin via " << requester << "] " << cmd << endl;
+    }
+
     void kickUser(const string &username)
     {
         lock_guard<mutex> lock(clientsMutex);
@@ -817,11 +858,11 @@ private:
                 send(it->socket, msg.c_str(), msg.size(), 0);
                 close(it->socket);
                 clients.erase(it);
-                cout << COLOR_RED << "⚠ Kicked user: " << COLOR_RESET << username << endl;
+                cout << "Kicked user: " << username << endl;
                 return;
             }
         }
-        cout << COLOR_YELLOW << "⚠ No such user: " << COLOR_RESET << username << endl;
+        cout << "No such user: " << username << endl;
     }
 };
 
@@ -830,7 +871,7 @@ void signalHandler(int signal)
 {
     if (signal == SIGINT || signal == SIGTERM)
     {
-        cout << "\n" << COLOR_RED << "⏻ Shutting down server..." << COLOR_RESET << endl;
+        cout << "\nShutting down server..." << endl;
         if (serverInstance)
             serverInstance->stop();
         exit(0);

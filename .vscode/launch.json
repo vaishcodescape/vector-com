@@ -6,8 +6,8 @@
       "type": "lldb",
       "request": "launch",
       "args": [],
-      "cwd": "/Users/avaish/Desktop/Opticom",
-      "program": "/Users/avaish/Desktop/Opticom/build/Debug/outDebug"
+      "cwd": "/Users/avaish/Desktop/Vectorcom",
+      "program": "/Users/avaish/Desktop/Vectorcom/build/Debug/outDebug"
     }
   ]
 }
