@@ -1,4 +1,4 @@
-# Opticom — High-Performance Multi-Client Communication Server
+# Doppler — High-Performance Multi-Client Communication Server
 
 **A production-style TCP communication server and client in C++**, built from the ground up with concurrency, encryption, and real-time multi-room chat. No frameworks—just sockets, threads, and systems programming.
 
@@ -22,7 +22,7 @@ Ideal for roles in **backend systems**, **distributed systems**, **networking**,
 
 | Area | Technologies |
 |------|--------------|
-| **Language** | C++17 |
+| **Language** | C++17, Rust |
 | **Networking** | TCP sockets (POSIX), client–server architecture |
 | **Concurrency** | POSIX threads (pthreads), `std::mutex`, lock guards |
 | **Platform** | Linux, macOS (Unix/POSIX) |
