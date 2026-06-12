@@ -84,8 +84,8 @@ async fn main() -> Result<()> {
 }
 
 /// Apply an admin command against local state (standalone Rust server).
-/// `say`/`block`/`unblock` are fully supported; `kick`/`slowmode` require the
-/// C++ backend's admin path and are reported as unsupported here.
+/// `block`/`unblock` are special commands; anything else (including an
+/// optional `say ` prefix) is broadcast to all clients as-is.
 fn apply_admin_local(state: &Arc<ServerState>, cmd: &str) {
     let cmd = cmd.trim();
     if let Some(rest) = cmd.strip_prefix("say ") {
@@ -97,10 +97,10 @@ fn apply_admin_local(state: &Arc<ServerState>, cmd: &str) {
     } else if let Some(user) = cmd.strip_prefix("unblock ") {
         state.admin_block(user.trim(), false);
         state.log(format!("[admin] unblocked: {}", user.trim()));
-    } else if cmd.starts_with("kick ") || cmd.starts_with("slowmode ") {
-        state.log(format!("[admin] '{}' is only supported against a C++ backend", cmd));
-    } else {
-        state.log(format!("[admin] unknown command: {}", cmd));
+    } else if !cmd.is_empty() {
+        // Anything else typed by the admin is broadcast as-is.
+        state.admin_say(cmd.to_string());
+        state.log(format!("[admin] say: {}", cmd));
     }
 }
 
