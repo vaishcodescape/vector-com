@@ -12,7 +12,7 @@ use futures::StreamExt;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Cell, List, ListItem, Paragraph, Row, Table};
+use ratatui::widgets::{Block, BorderType, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table};
 use ratatui::{backend::CrosstermBackend, Terminal};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
@@ -22,6 +22,24 @@ use crate::state::ServerState;
 const ACCENT: Color = Color::Rgb(135, 206, 250);
 const MUTED: Color = Color::Rgb(140, 140, 140);
 const DIM: Color = Color::Rgb(90, 90, 90);
+
+/// Admin commands: (name, usage, help). Typed plain or with a leading '/',
+/// which opens the dropdown; the slash is stripped before dispatch.
+const ADMIN_COMMANDS: &[(&str, &str, &str)] = &[
+    ("kick", "kick <user>", "disconnect a user"),
+    ("say", "say <message>", "broadcast to all rooms"),
+    ("block", "block <user>", "block a user from sending messages"),
+    ("unblock", "unblock <user>", "unblock a user"),
+    ("slowmode", "slowmode <room> <secs>", "set per-room message cooldown"),
+];
+
+fn suggestions(input: &str) -> Vec<&'static (&'static str, &'static str, &'static str)> {
+    if input.is_empty() || input.contains(' ') {
+        return Vec::new();
+    }
+    let typed = input.strip_prefix('/').unwrap_or(input);
+    ADMIN_COMMANDS.iter().filter(|(name, _, _)| name.starts_with(typed)).collect()
+}
 
 pub async fn run(state: Arc<ServerState>, addr: String, admin_tx: mpsc::Sender<String>) -> Result<()> {
     enable_raw_mode()?;
@@ -48,11 +66,12 @@ async fn event_loop<B: ratatui::backend::Backend>(
     let started = Instant::now();
     let mut tick = tokio::time::interval(Duration::from_millis(250));
     let mut input = String::new();
+    let mut suggest_idx: usize = 0;
 
     loop {
         state.set_uptime(started.elapsed());
         let snap = state.snapshot();
-        terminal.draw(|f| draw(f, &snap, &addr, &input))?;
+        terminal.draw(|f| draw(f, &snap, &addr, &input, suggest_idx))?;
 
         tokio::select! {
             _ = tick.tick() => {}
@@ -62,6 +81,7 @@ async fn event_loop<B: ratatui::backend::Backend>(
                         continue;
                     }
                     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+                    let sugg_count = suggestions(&input).len();
                     match k.code {
                         KeyCode::Char('c') if ctrl => return Ok(()),
                         KeyCode::Esc => {
@@ -69,16 +89,37 @@ async fn event_loop<B: ratatui::backend::Backend>(
                                 return Ok(());
                             }
                             input.clear();
+                            suggest_idx = 0;
+                        }
+                        KeyCode::Up if sugg_count > 0 => {
+                            suggest_idx = suggest_idx.min(sugg_count - 1)
+                                .checked_sub(1).unwrap_or(sugg_count - 1);
+                        }
+                        KeyCode::Down if sugg_count > 0 => {
+                            suggest_idx = (suggest_idx.min(sugg_count - 1) + 1) % sugg_count;
+                        }
+                        KeyCode::Tab if sugg_count > 0 => {
+                            let (name, _, _) = suggestions(&input)[suggest_idx.min(sugg_count - 1)];
+                            input = format!("{} ", name);
+                            suggest_idx = 0;
                         }
                         KeyCode::Enter => {
-                            let cmd = input.trim().to_string();
+                            // Commands may be typed with a leading '/'.
+                            let cmd = input.trim().trim_start_matches('/').to_string();
                             input.clear();
+                            suggest_idx = 0;
                             if !cmd.is_empty() {
                                 let _ = admin_tx.send(cmd).await;
                             }
                         }
-                        KeyCode::Backspace => { input.pop(); }
-                        KeyCode::Char(c) if !ctrl => input.push(c),
+                        KeyCode::Backspace => {
+                            input.pop();
+                            suggest_idx = 0;
+                        }
+                        KeyCode::Char(c) if !ctrl => {
+                            input.push(c);
+                            suggest_idx = 0;
+                        }
                         _ => {}
                     }
                 }
@@ -87,7 +128,7 @@ async fn event_loop<B: ratatui::backend::Backend>(
     }
 }
 
-fn draw(f: &mut ratatui::Frame, snap: &crate::state::Snapshot, addr: &str, input: &str) {
+fn draw(f: &mut ratatui::Frame, snap: &crate::state::Snapshot, addr: &str, input: &str, suggest_idx: usize) {
     let area = f.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -116,6 +157,7 @@ fn draw(f: &mut ratatui::Frame, snap: &crate::state::Snapshot, addr: &str, input
     draw_log(f, body[1], snap);
     draw_input(f, chunks[2], input);
     draw_footer(f, chunks[3]);
+    draw_command_dropdown(f, chunks[2], input, suggest_idx);
 
     // Place the cursor after the typed text inside the input box.
     let cursor_x = chunks[2].x + 4 + input.chars().count() as u16;
@@ -133,13 +175,65 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, input: &str) {
     let prompt = Span::styled(" › ", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD));
     let body: Span = if input.is_empty() {
         Span::styled(
-            "kick <user>   say <msg>   slowmode <room> <secs>",
+            "type / for commands — kick · say · block · unblock · slowmode",
             Style::default().fg(DIM).add_modifier(Modifier::ITALIC),
         )
     } else {
         Span::styled(input.to_string(), Style::default().fg(Color::White))
     };
     f.render_widget(Paragraph::new(Line::from(vec![prompt, body])).block(block), area);
+}
+
+/// Dropdown listing matching admin commands with help text, anchored above
+/// the admin prompt while the first word is being typed.
+fn draw_command_dropdown(f: &mut ratatui::Frame, input_area: Rect, input: &str, suggest_idx: usize) {
+    let sugg = suggestions(input);
+    if sugg.is_empty() {
+        return;
+    }
+    let selected = suggest_idx.min(sugg.len() - 1);
+
+    let usage_w = sugg.iter().map(|(_, usage, _)| usage.len()).max().unwrap_or(0);
+    let height = (sugg.len() as u16 + 2).min(input_area.y);
+    if height < 3 {
+        return;
+    }
+    let width = (usage_w + sugg.iter().map(|(_, _, help)| help.len()).max().unwrap_or(0) + 7)
+        .min(input_area.width.saturating_sub(4) as usize) as u16;
+    let area = Rect {
+        x: input_area.x + 2,
+        y: input_area.y - height,
+        width,
+        height,
+    };
+
+    let lines: Vec<Line> = sugg
+        .iter()
+        .enumerate()
+        .map(|(i, (_, usage, help))| {
+            let (usage_style, help_style) = if i == selected {
+                (
+                    Style::default().fg(Color::Black).bg(ACCENT).add_modifier(Modifier::BOLD),
+                    Style::default().fg(Color::Black).bg(ACCENT),
+                )
+            } else {
+                (Style::default().fg(Color::White), Style::default().fg(MUTED))
+            };
+            Line::from(vec![
+                Span::styled(format!(" {:<w$}  ", usage, w = usage_w), usage_style),
+                Span::styled(format!("{} ", help), help_style),
+            ])
+        })
+        .collect();
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(DIM))
+        .title(Span::styled(" admin commands ", Style::default().fg(MUTED)))
+        .title_bottom(Span::styled(" ↑↓ select · tab complete ", Style::default().fg(DIM)));
+    f.render_widget(Clear, area);
+    f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 fn draw_header(f: &mut ratatui::Frame, area: Rect, snap: &crate::state::Snapshot, addr: &str) {

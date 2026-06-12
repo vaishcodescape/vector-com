@@ -1,7 +1,7 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
@@ -29,6 +29,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     draw_history(f, chunks[1], app);
     draw_input(f, chunks[2], app);
     draw_hints(f, chunks[3]);
+    draw_command_dropdown(f, chunks[2], app);
 
     let input_inner_x = chunks[2].x + 4 + visible_input_width(&app.input.buf[..app.input.cursor]) as u16;
     let input_inner_y = chunks[2].y + 1;
@@ -166,6 +167,59 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(para, area);
 }
 
+/// Dropdown listing matching slash commands with their help text, anchored
+/// above the input box while the user types a `/command`.
+fn draw_command_dropdown(f: &mut Frame, input_area: Rect, app: &App) {
+    let sugg = app.suggestions();
+    if sugg.is_empty() {
+        return;
+    }
+    let selected = app.selected_suggestion_idx();
+
+    let usage_w = sugg.iter().map(|c| c.usage.len()).max().unwrap_or(0);
+    let rows = sugg.len() as u16;
+    let height = (rows + 2).min(input_area.y);
+    if height < 3 {
+        return;
+    }
+    let width = (usage_w + sugg.iter().map(|c| c.help.len()).max().unwrap_or(0) + 7)
+        .min(input_area.width.saturating_sub(4) as usize) as u16;
+    let area = Rect {
+        x: input_area.x + 2,
+        y: input_area.y - height,
+        width,
+        height,
+    };
+
+    let lines: Vec<Line> = sugg
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let (usage_style, help_style) = if i == selected {
+                (
+                    Style::default().fg(Color::Black).bg(ACCENT).add_modifier(Modifier::BOLD),
+                    Style::default().fg(Color::Black).bg(ACCENT),
+                )
+            } else {
+                (Style::default().fg(SOFT), Style::default().fg(MUTED))
+            };
+            Line::from(vec![
+                Span::styled(format!(" {:<w$}  ", c.usage, w = usage_w), usage_style),
+                Span::styled(format!("{} ", c.help), help_style),
+            ])
+        })
+        .collect();
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(DIM))
+        .title(Span::styled(" commands ", Style::default().fg(MUTED)))
+        .title_bottom(Span::styled(" ↑↓ select · tab complete ", Style::default().fg(DIM)));
+    f.render_widget(Clear, area);
+    f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
 fn draw_hints(f: &mut Frame, area: Rect) {
     let p = Paragraph::new(Line::from(vec![
         Span::styled("  enter ", Style::default().fg(ACCENT)),
@@ -177,7 +231,7 @@ fn draw_hints(f: &mut Frame, area: Rect) {
         Span::styled("   ctrl-l ", Style::default().fg(ACCENT)),
         Span::styled("clear", Style::default().fg(MUTED)),
         Span::styled("   esc ", Style::default().fg(ACCENT)),
-        Span::styled("quit", Style::default().fg(MUTED)),
+        Span::styled("clear / quit", Style::default().fg(MUTED)),
     ]));
     f.render_widget(p, area);
 }

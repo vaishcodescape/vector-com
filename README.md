@@ -8,6 +8,8 @@ The C++ programs are **headless backends** and the Rust TUI is the **only UI**:
 
 The Rust binaries are **wire-compatible** with the C++ backend, so they speak the exact same protocol.
 
+![Vectorcom demo](images/vector-com-demo.png)
+
 ## Quick start
 
 Two commands — each builds everything and launches both the backend and its TUI:
@@ -43,14 +45,14 @@ make client HOST=192.168.1.10 PORT=9090 USER=alice
 
 ### Security
 * **XOR message encryption** between clients and the backend (shared key)
-* **User blocking** — block/unblock users; blocked users can't reach you (including PMs)
+* **User blocking** — admin-managed; blocked users can't send messages (including PMs)
 * **Rate limiting** — spam protection (3 messages/second)
 * **Room slowmode** — admin-controlled per-room message cooldown
 
 ### Operations
 * **Headless C++ backend** — plain-text status logs to stdout, no terminal decoration
-* **Admin console** — control the backend from its stdin (`kick`, `say`, `slowmode`, `list`, `help`)
-* **Rust dashboard** — live ratatui view of rooms, users, and activity, with a built-in **admin command prompt** that drives the backend over the wire (`kick`, `say`, `slowmode`)
+* **Admin console** — control the backend from its stdin (`kick`, `say`, `block`, `unblock`, `slowmode`, `list`, `help`)
+* **Rust dashboard** — live ratatui view of rooms, users, and activity, with a built-in **admin command prompt** that drives the backend over the wire (`kick`, `say`, `block`, `unblock`, `slowmode`)
 
 ## Components
 
@@ -89,7 +91,9 @@ The backend logs plain status lines to stdout and reads **admin commands** from 
 
 * `list` — show connected users with IPs and rooms
 * `kick <username>` — disconnect a user
-* `say <message>` — broadcast to the general room
+* `say <message>` — broadcast to all rooms
+* `block <username>` — block a user from sending messages
+* `unblock <username>` — unblock a user
 * `slowmode <room> <seconds>` — set per-room slowmode
 * `help` — show admin commands
 
@@ -115,13 +119,17 @@ screen) lets you type commands that are relayed to the backend:
 | Command | Action |
 |---------|--------|
 | `kick <user>` | disconnect a user |
-| `say <message>` | broadcast a server notice to the general room |
+| `say <message>` | broadcast a server notice to all rooms |
+| `block <user>` | block a user from sending messages |
+| `unblock <user>` | unblock a user |
 | `slowmode <room> <seconds>` | set per-room slowmode |
 
-`Enter` runs the command, `Esc` clears the prompt (or quits when empty), `Ctrl-C` quits.
+Typing `/` opens a **dropdown** listing every admin command with its help text —
+`↑`/`↓` to select, `Tab` to complete. `Enter` runs the command, `Esc` clears the
+prompt (or quits when empty), `Ctrl-C` quits.
 Admin commands travel as `/admin <cmd>` over the socket and are **unauthenticated** —
 intended for a trusted local operator, consistent with this project's educational scope.
-(Against a standalone Rust server, only `say` is supported.)
+(Against a standalone Rust server, only `say`, `block`, and `unblock` are supported.)
 
 ### C++ headless relay (optional)
 
@@ -147,11 +155,13 @@ Type these in the Rust client TUI (most are handled by the backend):
 | `/pin <message>` | pin a message to the room board |
 | `/pins` | view pinned messages |
 | `/unpin <index>` | remove a pinned message |
-| `/block <user>` | block a user |
-| `/unblock <user>` | unblock a user |
-| `/blocklist` | show your blocked users |
 | `/clear` | clear the local view (client-side only) |
 | `/quit` | disconnect |
+
+Blocking/unblocking is **admin-only** — clients have no blocking permissions.
+
+Typing `/` opens a **dropdown** listing the available commands with their help
+text — `↑`/`↓` to select, `Tab` to complete.
 
 ### Client TUI shortcuts
 
@@ -161,7 +171,9 @@ Type these in the Rust client TUI (most are handled by the backend):
 | `↑` / `↓` | scroll history |
 | `PageUp` / `PageDown` | scroll history by page |
 | `Ctrl-L` | clear local history |
-| `Esc` / `Ctrl-C` | quit |
+| `Tab` | complete the selected command from the `/` dropdown |
+| `Esc` | clear input (quit when input is empty) |
+| `Ctrl-C` | quit |
 
 ## Protocol & security
 
@@ -173,7 +185,7 @@ The wire format is **XOR-encrypted, newline-framed plaintext** over TCP:
 
 The XOR scheme provides basic obfuscation against casual packet sniffing — it is **educational, not production-grade**. For real deployments, use TLS.
 
-Blocking is enforced server-side: block lists are stored per client and filtered during both broadcasts and private messages.
+Blocking is enforced server-side: the admin-managed block list is checked before chat broadcasts and private messages are delivered, so blocked users cannot send either.
 
 ## Architecture notes
 

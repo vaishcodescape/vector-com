@@ -2,6 +2,22 @@ use std::collections::VecDeque;
 
 use crate::net::ConnStatus;
 
+pub struct Command {
+    pub name: &'static str,
+    pub usage: &'static str,
+    pub help: &'static str,
+}
+
+pub const COMMANDS: &[Command] = &[
+    Command { name: "/help", usage: "/help", help: "show available commands" },
+    Command { name: "/join", usage: "/join <room>", help: "join or create a room" },
+    Command { name: "/list", usage: "/list", help: "list users in your room" },
+    Command { name: "/rooms", usage: "/rooms", help: "list active rooms" },
+    Command { name: "/pm", usage: "/pm <user> <message>", help: "send a private message" },
+    Command { name: "/clear", usage: "/clear", help: "clear chat history" },
+    Command { name: "/quit", usage: "/quit", help: "disconnect and exit" },
+];
+
 pub struct App {
     pub username: String,
     pub server_addr: String,
@@ -11,6 +27,7 @@ pub struct App {
     pub input: Input,
     pub scroll_offset: usize,
     pub connection: ConnStatus,
+    pub suggest_idx: usize,
 }
 
 impl App {
@@ -24,6 +41,46 @@ impl App {
             input: Input::default(),
             scroll_offset: 0,
             connection: ConnStatus::Connecting,
+            suggest_idx: 0,
+        }
+    }
+
+    /// Commands matching the input, shown as a dropdown while the user is
+    /// typing the first word of a `/command`.
+    pub fn suggestions(&self) -> Vec<&'static Command> {
+        let buf = &self.input.buf;
+        if !buf.starts_with('/') || buf.contains(' ') {
+            return Vec::new();
+        }
+        COMMANDS.iter().filter(|c| c.name.starts_with(buf.as_str())).collect()
+    }
+
+    pub fn selected_suggestion_idx(&self) -> usize {
+        let n = self.suggestions().len();
+        if n == 0 { 0 } else { self.suggest_idx.min(n - 1) }
+    }
+
+    pub fn suggest_up(&mut self) {
+        let n = self.suggestions().len();
+        if n > 0 {
+            self.suggest_idx = self.selected_suggestion_idx().checked_sub(1).unwrap_or(n - 1);
+        }
+    }
+
+    pub fn suggest_down(&mut self) {
+        let n = self.suggestions().len();
+        if n > 0 {
+            self.suggest_idx = (self.selected_suggestion_idx() + 1) % n;
+        }
+    }
+
+    pub fn complete_suggestion(&mut self) {
+        let idx = self.selected_suggestion_idx();
+        if let Some(cmd) = self.suggestions().get(idx).copied() {
+            let takes_args = cmd.usage.contains('<');
+            self.input.buf = format!("{}{}", cmd.name, if takes_args { " " } else { "" });
+            self.input.cursor = self.input.buf.len();
+            self.suggest_idx = 0;
         }
     }
 

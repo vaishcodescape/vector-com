@@ -22,7 +22,7 @@ use crate::app::{App, ChatLine, LineKind};
 #[derive(Parser, Debug)]
 #[command(name = "vectorcom", about = "Vectorcom chat client")]
 struct Args {
-    #[arg(short, long, default_value = "127.0.0.1")]
+    #[arg(short = 'H', long, default_value = "127.0.0.1")]
     host: String,
     #[arg(short, long, default_value_t = DEFAULT_PORT)]
     port: u16,
@@ -155,10 +155,20 @@ fn handle_server_msg(app: &mut App, msg: ServerMessage) {
 
 async fn handle_key(app: &mut App, k: KeyEvent, out: &mpsc::Sender<ClientMessage>) -> bool {
     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+    let dropdown = !app.suggestions().is_empty();
     match k.code {
-        KeyCode::Esc => return true,
+        KeyCode::Esc => {
+            if app.input.buf.is_empty() {
+                return true;
+            }
+            app.input.take();
+            app.suggest_idx = 0;
+        }
         KeyCode::Char('c') if ctrl => return true,
         KeyCode::Char('l') if ctrl => app.history.clear(),
+        KeyCode::Tab if dropdown => app.complete_suggestion(),
+        KeyCode::Up if dropdown => app.suggest_up(),
+        KeyCode::Down if dropdown => app.suggest_down(),
         KeyCode::Enter => {
             let text = app.input.take();
             if !text.is_empty() {
@@ -174,7 +184,10 @@ async fn handle_key(app: &mut App, k: KeyEvent, out: &mpsc::Sender<ClientMessage
                 }
             }
         }
-        KeyCode::Backspace => app.input.backspace(),
+        KeyCode::Backspace => {
+            app.input.backspace();
+            app.suggest_idx = 0;
+        }
         KeyCode::Delete => app.input.delete(),
         KeyCode::Left => app.input.left(),
         KeyCode::Right => app.input.right(),
@@ -184,7 +197,10 @@ async fn handle_key(app: &mut App, k: KeyEvent, out: &mpsc::Sender<ClientMessage
         KeyCode::Down => app.scroll_down(),
         KeyCode::PageUp => app.page_up(),
         KeyCode::PageDown => app.page_down(),
-        KeyCode::Char(c) => app.input.insert(c),
+        KeyCode::Char(c) => {
+            app.input.insert(c);
+            app.suggest_idx = 0;
+        }
         _ => {}
     }
     false
@@ -200,7 +216,7 @@ fn parse_command(app: &mut App, text: &str) -> Option<ClientMessage> {
     match cmd {
         "help" => {
             app.push(ChatLine::system(
-                "/join <room>  /list  /rooms  /pm <user> <msg>  /block <user>  /unblock <user>  /clear  /quit".into(),
+                "/join <room>  /list  /rooms  /pm <user> <msg>  /clear  /quit".into(),
             ));
             None
         }
@@ -225,8 +241,10 @@ fn parse_command(app: &mut App, text: &str) -> Option<ClientMessage> {
                 }
             }
         }
-        "block" if !rest.is_empty() => Some(ClientMessage::Block { username: rest.into() }),
-        "unblock" if !rest.is_empty() => Some(ClientMessage::Unblock { username: rest.into() }),
+        "block" | "unblock" | "blocklist" => {
+            app.push(ChatLine::error("blocking is managed by the server admin".into()));
+            None
+        }
         "clear" => {
             app.history.clear();
             None

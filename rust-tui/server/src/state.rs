@@ -13,7 +13,6 @@ pub struct Client {
     pub username: String,
     pub room: String,
     pub tx: Sender<ServerMessage>,
-    pub blocked: HashSet<String>,
 }
 
 pub struct ServerState {
@@ -25,6 +24,8 @@ struct Inner {
     clients: BTreeMap<ClientId, Client>,
     name_to_id: BTreeMap<String, ClientId>,
     rooms: BTreeMap<String, HashSet<ClientId>>,
+    // Admin-managed: blocked users cannot send chat messages or PMs.
+    blocked: HashSet<String>,
     log: VecDeque<LogLine>,
     total_messages: u64,
     total_connections: u64,
@@ -52,6 +53,7 @@ impl ServerState {
                 clients: BTreeMap::new(),
                 name_to_id: BTreeMap::new(),
                 rooms,
+                blocked: HashSet::new(),
                 log: VecDeque::with_capacity(512),
                 total_messages: 0,
                 total_connections: 0,
@@ -75,14 +77,37 @@ impl ServerState {
         self.inner.lock().unwrap().observed_rooms = rooms;
     }
 
-    /// Broadcast a server notice to the default room (used by `say` admin
-    /// command when running as a standalone Rust server).
+    /// Broadcast a server notice to every connected client (used by the `say`
+    /// admin command when running as a standalone Rust server).
     pub fn admin_say(&self, text: String) {
-        self.broadcast_room(
-            DEFAULT_ROOM,
-            ServerMessage::System { text: format!("[SERVER] {}", text), ts: now_ts() },
-            None,
-        );
+        let msg = ServerMessage::System { text: format!("[SERVER] {}", text), ts: now_ts() };
+        let g = self.inner.lock().unwrap();
+        for c in g.clients.values() {
+            let _ = c.tx.try_send(msg.clone());
+        }
+    }
+
+    /// Admin-managed block list: blocked users cannot send chat messages or PMs.
+    pub fn admin_block(&self, username: &str, block: bool) {
+        let target = {
+            let mut g = self.inner.lock().unwrap();
+            if block {
+                g.blocked.insert(username.to_string());
+            } else {
+                g.blocked.remove(username);
+            }
+            g.name_to_id.get(username).copied()
+        };
+        if let Some(id) = target {
+            self.send_to(id, ServerMessage::System {
+                text: format!("[SERVER] You have been {} by the admin.", if block { "blocked" } else { "unblocked" }),
+                ts: now_ts(),
+            });
+        }
+    }
+
+    fn is_blocked(&self, username: &str) -> bool {
+        self.inner.lock().unwrap().blocked.contains(username)
     }
 
     pub fn log(&self, text: impl Into<String>) {
@@ -132,7 +157,6 @@ impl ServerState {
             username: username.clone(),
             room: DEFAULT_ROOM.into(),
             tx,
-            blocked: HashSet::new(),
         };
         g.clients.insert(id, client);
         g.name_to_id.insert(username, id);
@@ -171,11 +195,6 @@ impl ServerState {
                     continue;
                 }
                 if let Some(c) = g.clients.get(&mid) {
-                    if let ServerMessage::Chat { from, .. } = &msg {
-                        if c.blocked.contains(from) {
-                            continue;
-                        }
-                    }
                     let _ = c.tx.try_send(msg.clone());
                 }
             }
@@ -190,6 +209,12 @@ impl ServerState {
                 None => return,
             }
         };
+        if self.is_blocked(&from) {
+            self.send_to(id, ServerMessage::Error {
+                text: "you are blocked by the admin and cannot send messages".into(),
+            });
+            return;
+        }
         let msg = ServerMessage::Chat { from, room: room.clone(), text, ts: now_ts() };
         // Exclude the sender: the client echoes its own message locally, so
         // echoing it back here would display it twice.
@@ -257,15 +282,16 @@ impl ServerState {
             let target = g.name_to_id.get(&to).copied();
             (from, target)
         };
+        if self.is_blocked(&from_name) {
+            self.send_to(id, ServerMessage::Error {
+                text: "you are blocked by the admin and cannot send messages".into(),
+            });
+            return;
+        }
         match target_id {
             Some(tid) => {
                 let g = self.inner.lock().unwrap();
                 if let Some(target) = g.clients.get(&tid) {
-                    if target.blocked.contains(&from_name) {
-                        drop(g);
-                        self.send_to(id, ServerMessage::Error { text: format!("you are blocked by {}", to) });
-                        return;
-                    }
                     let _ = target.tx.try_send(ServerMessage::Pm { from: from_name, text, ts: now_ts() });
                 }
             }
@@ -273,21 +299,10 @@ impl ServerState {
         }
     }
 
-    pub fn handle_block(&self, id: ClientId, target: String, block: bool) {
-        let mut g = self.inner.lock().unwrap();
-        let c = match g.clients.get_mut(&id) {
-            Some(c) => c,
-            None => return,
-        };
-        if block {
-            c.blocked.insert(target.clone());
-        } else {
-            c.blocked.remove(&target);
-        }
-        let tx = c.tx.clone();
-        let _ = tx.try_send(ServerMessage::System {
-            text: format!("{} {}", if block { "blocked" } else { "unblocked" }, target),
-            ts: now_ts(),
+    /// Clients have no blocking permissions; blocking is admin-only.
+    pub fn handle_block(&self, id: ClientId, _target: String, _block: bool) {
+        self.send_to(id, ServerMessage::Error {
+            text: "blocking is managed by the server admin".into(),
         });
     }
 }

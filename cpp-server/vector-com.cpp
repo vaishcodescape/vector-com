@@ -22,6 +22,7 @@
 #include <sstream>
 #include <fstream>
 #include <unordered_map>
+#include <unordered_set>
 #include <sys/types.h>
 #include <sys/stat.h>
 
@@ -30,7 +31,7 @@ using namespace std;
 // Simple XOR encryption/decryption
 namespace Encryption
 {
-    const string KEY = "VectorcomSecureKey2025"; // Shared key
+    const string KEY = "cracked-developer"; // Shared key
     
     string encrypt(const string &plaintext)
     {
@@ -54,7 +55,6 @@ struct ClientInfo
     string name;
     string addr;
     string room = "general";
-    vector<string> blockedUsers; // List of blocked usernames
 
     chrono::steady_clock::time_point lastMsgTime = chrono::steady_clock::now();
     int msgCount = 0;
@@ -71,6 +71,7 @@ private:
     mutex clientsMutex;
     bool running;
     unordered_map<string, int> roomSlowmodeSeconds; // seconds per room
+    unordered_set<string> blockedUsers; // admin-managed: blocked users cannot send messages
 
 public:
     ChatServer(int port) : port(port), running(false)
@@ -196,7 +197,27 @@ private:
             else if (cmd.rfind("say ", 0) == 0)
             {
                 string msg = "[SERVER] " + cmd.substr(4);
-                broadcastMessage(msg, -1, "general");
+                broadcastMessage(msg, -1, "");
+            }
+            else if (cmd.rfind("block ", 0) == 0)
+            {
+                string user = cmd.substr(6);
+                {
+                    lock_guard<mutex> lock(clientsMutex);
+                    blockedUsers.insert(user);
+                }
+                notifyUser(user, "[SERVER] You have been blocked by the admin.");
+                cout << "Blocked user: " << user << endl;
+            }
+            else if (cmd.rfind("unblock ", 0) == 0)
+            {
+                string user = cmd.substr(8);
+                {
+                    lock_guard<mutex> lock(clientsMutex);
+                    blockedUsers.erase(user);
+                }
+                notifyUser(user, "[SERVER] You have been unblocked by the admin.");
+                cout << "Unblocked user: " << user << endl;
             }
             else if (cmd.rfind("slowmode ", 0) == 0)
             {
@@ -229,7 +250,9 @@ private:
             {
                 cout << "Admin commands:\n";
                 cout << "  kick <username>       - Kick a user\n";
-                cout << "  say <message>         - Broadcast to general room\n";
+                cout << "  say <message>         - Broadcast to all rooms\n";
+                cout << "  block <username>      - Block a user from sending messages\n";
+                cout << "  unblock <username>    - Unblock a user\n";
                 cout << "  slowmode <room> <sec> - Set room slowmode\n";
                 cout << "  list                  - List online users\n";
                 cout << "  help                  - Show this help\n";
@@ -377,9 +400,6 @@ private:
                     "/rooms              - List all active rooms\n"
                     "/join <room>        - Join or create a room\n"
                     "/pm <user> <msg>    - Private message\n"
-                    "/block <user>       - Block messages from a user\n"
-                    "/unblock <user>     - Unblock a user\n"
-                    "/blocklist          - Show your blocked users\n"
                     "/pin <msg>          - Pin a message to the room board\n"
                     "/pins               - Show pinned messages for the room\n"
                     "/unpin <index>      - Remove a pinned message by index\n"
@@ -448,95 +468,10 @@ private:
                 continue;
             }
 
-            if (msg.rfind("/block ", 0) == 0)
+            if (msg.rfind("/block", 0) == 0 || msg.rfind("/unblock", 0) == 0 || msg == "/blocklist")
             {
-                string targetUser = msg.substr(7);
-                if (targetUser.empty())
-                {
-                    string err = "Usage: /block <username>\n";
-                    sendAll(clientSocket, err.c_str(), err.size());
-                    continue;
-                }
-                {
-                    lock_guard<mutex> lock(clientsMutex);
-                    for (auto &c : clients)
-                    {
-                        if (c.socket == clientSocket)
-                        {
-                            if (find(c.blockedUsers.begin(), c.blockedUsers.end(), targetUser) != c.blockedUsers.end())
-                            {
-                                string msg = "User '" + targetUser + "' is already blocked.\n";
-                                sendAll(clientSocket, msg.c_str(), msg.size());
-                            }
-                            else
-                            {
-                                c.blockedUsers.push_back(targetUser);
-                                string msg = "Blocked user '" + targetUser + "'.\n";
-                                sendAll(clientSocket, msg.c_str(), msg.size());
-                            }
-                            break;
-                        }
-                    }
-                }
-                continue;
-            }
-
-            if (msg.rfind("/unblock ", 0) == 0)
-            {
-                string targetUser = msg.substr(9);
-                if (targetUser.empty())
-                {
-                    string err = "Usage: /unblock <username>\n";
-                    sendAll(clientSocket, err.c_str(), err.size());
-                    continue;
-                }
-                {
-                    lock_guard<mutex> lock(clientsMutex);
-                    for (auto &c : clients)
-                    {
-                        if (c.socket == clientSocket)
-                        {
-                            auto it = find(c.blockedUsers.begin(), c.blockedUsers.end(), targetUser);
-                            if (it != c.blockedUsers.end())
-                            {
-                                c.blockedUsers.erase(it);
-                                string msg = "Unblocked user '" + targetUser + "'.\n";
-                                sendAll(clientSocket, msg.c_str(), msg.size());
-                            }
-                            else
-                            {
-                                string msg = "User '" + targetUser + "' is not blocked.\n";
-                                sendAll(clientSocket, msg.c_str(), msg.size());
-                            }
-                            break;
-                        }
-                    }
-                }
-                continue;
-            }
-
-            if (msg == "/blocklist")
-            {
-                lock_guard<mutex> lock(clientsMutex);
-                for (auto &c : clients)
-                {
-                    if (c.socket == clientSocket)
-                    {
-                        if (c.blockedUsers.empty())
-                        {
-                            string msg = "You have no blocked users.\n";
-                            sendAll(clientSocket, msg.c_str(), msg.size());
-                        }
-                        else
-                        {
-                            string msg = "Blocked users:\n";
-                            for (const auto &u : c.blockedUsers)
-                                msg += " - " + u + "\n";
-                            sendAll(clientSocket, msg.c_str(), msg.size());
-                        }
-                        break;
-                    }
-                }
+                string err = "Blocking is managed by the server admin.\n";
+                sendAll(clientSocket, err.c_str(), err.size());
                 continue;
             }
 
@@ -699,6 +634,16 @@ private:
                 }
             }
 
+            {
+                lock_guard<mutex> lock(clientsMutex);
+                if (blockedUsers.count(username))
+                {
+                    string warn = "You are blocked by the admin and cannot send messages.\n";
+                    sendAll(clientSocket, warn.c_str(), warn.size());
+                    continue;
+                }
+            }
+
             string formatted = "[" + nowTimestamp() + "] " + username + ": " + msg;
             cout << formatted << endl;
             broadcastMessage(formatted, clientSocket, getClientRoom(clientSocket));
@@ -723,23 +668,19 @@ private:
         {
             if (c.name == fromUser) fromSock = c.socket;
         }
+        if (blockedUsers.count(fromUser))
+        {
+            if (fromSock != -1)
+            {
+                string notice = "You are blocked by the admin and cannot send messages.\n";
+                sendAll(fromSock, notice.c_str(), notice.size());
+            }
+            return;
+        }
         for (auto &c : clients)
         {
             if (c.name == toUser)
             {
-                // Check if receiver has blocked sender
-                bool isBlocked = find(c.blockedUsers.begin(), c.blockedUsers.end(), fromUser) != c.blockedUsers.end();
-                
-                if (isBlocked)
-                {
-                    if (fromSock != -1)
-                    {
-                        string notice = "Cannot send message: user has blocked you.\n";
-                        sendAll(fromSock, notice.c_str(), notice.size());
-                    }
-                    return;
-                }
-                
                 string formatted = "[PM from " + fromUser + "] " + msg + "\n";
                 sendAll(c.socket, formatted.c_str(), formatted.size());
                 return;
@@ -755,35 +696,20 @@ private:
     void broadcastMessage(const string &message, int senderSocket, const string &room)
     {
         lock_guard<mutex> lock(clientsMutex);
-        
-        // Get sender's username
-        string senderName;
-        for (const auto &c : clients)
-        {
-            if (c.socket == senderSocket)
-            {
-                senderName = c.name;
-                break;
-            }
-        }
-        
+
         for (auto it = clients.begin(); it != clients.end();)
         {
-            if (it->room == room && it->socket != senderSocket)
+            // An empty room means "all rooms" (admin broadcasts).
+            if ((room.empty() || it->room == room) && it->socket != senderSocket)
             {
-                // Check if receiver has blocked the sender
-                bool isBlocked = find(it->blockedUsers.begin(), it->blockedUsers.end(), senderName) != it->blockedUsers.end();
-                
-                if (!isBlocked)
+                // Message + newline in one send so they stay one XOR unit.
+                string framed = message + "\n";
+                bool ok = sendAll(it->socket, framed.c_str(), framed.size());
+                if (!ok)
                 {
-                    bool ok = sendAll(it->socket, message.c_str(), message.size()) &&
-                              sendAll(it->socket, "\n", 1);
-                    if (!ok)
-                    {
-                        close(it->socket);
-                        it = clients.erase(it);
-                        continue;
-                    }
+                    close(it->socket);
+                    it = clients.erase(it);
+                    continue;
                 }
             }
             ++it;
@@ -817,8 +743,28 @@ private:
         else if (cmd.rfind("say ", 0) == 0)
         {
             string notice = "[SERVER] " + cmd.substr(4);
-            broadcastMessage(notice, -1, "general");
-            reply("[SERVER] broadcast sent to general");
+            broadcastMessage(notice, -1, "");
+            reply("[SERVER] broadcast sent to all rooms");
+        }
+        else if (cmd.rfind("block ", 0) == 0)
+        {
+            string user = cmd.substr(6);
+            {
+                lock_guard<mutex> lock(clientsMutex);
+                blockedUsers.insert(user);
+            }
+            notifyUser(user, "[SERVER] You have been blocked by the admin.");
+            reply("[SERVER] blocked: " + user);
+        }
+        else if (cmd.rfind("unblock ", 0) == 0)
+        {
+            string user = cmd.substr(8);
+            {
+                lock_guard<mutex> lock(clientsMutex);
+                blockedUsers.erase(user);
+            }
+            notifyUser(user, "[SERVER] You have been unblocked by the admin.");
+            reply("[SERVER] unblocked: " + user);
         }
         else if (cmd.rfind("slowmode ", 0) == 0)
         {
@@ -842,9 +788,23 @@ private:
         }
         else
         {
-            reply("Unknown admin command. Try: kick <user> | say <msg> | slowmode <room> <secs>");
+            reply("Unknown admin command. Try: kick <user> | say <msg> | block <user> | unblock <user> | slowmode <room> <secs>");
         }
         cout << "[admin via " << requester << "] " << cmd << endl;
+    }
+
+    void notifyUser(const string &username, const string &message)
+    {
+        lock_guard<mutex> lock(clientsMutex);
+        for (auto &c : clients)
+        {
+            if (c.name == username)
+            {
+                string m = message + "\n";
+                sendAll(c.socket, m.c_str(), m.size());
+                return;
+            }
+        }
     }
 
     void kickUser(const string &username)

@@ -4,7 +4,7 @@ pub const DEFAULT_PORT: u16 = 8080;
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const DEFAULT_ROOM: &str = "general";
 pub const MAX_MESSAGE_BYTES: usize = 8 * 1024;
-pub const XOR_KEY: &[u8] = b"VectorcomSecureKey2025";
+pub const XOR_KEY: &[u8] = b"cracked-developer";
 
 pub fn xor_bytes(data: &[u8]) -> Vec<u8> {
     data.iter()

@@ -19,7 +19,7 @@ using namespace std;
 // Simple XOR encryption/decryption (must match server)
 namespace Encryption
 {
-    const string KEY = "VectorcomSecureKey2025"; // Shared key (must match server)
+    const string KEY = "cracked-developer"; // Shared key (must match server)
 
     string encrypt(const string &plaintext)
     {
