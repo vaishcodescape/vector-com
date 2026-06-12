@@ -189,13 +189,6 @@ Blocking is enforced server-side: the admin-managed block list is checked before
 * **Rust side:** async Tokio I/O, ratatui rendering, auto-reconnect on the client; the dashboard observes the backend, polls it for roster/room state, and relays admin commands to it.
 * The C++ backend frames **one message per `recv`** and XOR-encrypts each `send` from key offset 0, so a client should send messages individually rather than batching many lines into a single TCP segment — which is exactly how the interactive TUI behaves. Under heavy bursts, coalesced segments can garble trailing lines; this is a known limitation of the simple framing.
 
-## Running on Windows
-
-Vectorcom targets Unix-like systems. On Windows, use one of:
-
-* **WSL** (recommended): `wsl --install`, then `sudo apt install g++ make` and install Rust via rustup inside Ubuntu. Behaves like native Linux.
-* **VS Code Remote – SSH** into a Linux VM (VirtualBox/VMware), then build and run normally.
-* **MinGW/Cygwin** is possible but requires swapping the POSIX socket headers for Winsock (`winsock2.h`, `WSAStartup()`); a Unix environment is strongly preferred.
 
 ## License
 
