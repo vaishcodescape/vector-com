@@ -127,9 +127,10 @@ screen) lets you type commands that are relayed to the backend:
 Typing `/` opens a **dropdown** listing every admin command with its help text —
 `↑`/`↓` to select, `Tab` to complete. `Enter` runs the command, `Esc` clears the
 prompt (or quits when empty), `Ctrl-C` quits.
-Admin commands travel as `/admin <cmd>` over the socket and are **unauthenticated** —
-intended for a trusted local operator, consistent with this project's educational scope.
-(Against a standalone Rust server, only `say`, `block`, and `unblock` are supported.)
+Admin commands travel as `/admin <token> <cmd>` over the socket; the token must
+match `VECTORCOM_ADMIN_TOKEN` on the backend (see [Admin authentication](#admin-authentication)).
+The dashboard reads the same env var and prepends the token automatically.
+(Against a standalone Rust server, only `say`, `block`, and `unblock` are supported and admin is local-only.)
 
 ### C++ headless relay (optional)
 
@@ -177,21 +178,39 @@ text — `↑`/`↓` to select, `Tab` to complete.
 
 ## Protocol & security
 
-The wire format is **XOR-encrypted, newline-framed plaintext** over TCP:
+The wire format is a **length-prefixed XOR-encrypted frame** over TCP:
 
-1. On connect, the client sends its username as the first message.
-2. Each subsequent line is a chat message or a `/command`, XOR-encrypted with the shared key.
-3. The server replies with rendered text lines (also XOR-encrypted).
+```
+[u32 big-endian payload length][N bytes, XOR-encrypted with the shared key]
+```
+
+The length prefix is unencrypted so the receiver can always locate frame boundaries; the XOR offset resets to zero per frame, which means TCP segment coalescing no longer desyncs the keystream (the older newline-framed scheme had this weakness). One frame = one logical message.
+
+1. On connect, the client sends its username as the first frame.
+2. Each subsequent frame is a chat message or `/command`.
+3. The server replies with one frame per logical reply (chat lines, `/list` blocks, etc.).
 
 The XOR scheme provides basic obfuscation against casual packet sniffing — it is **educational, not production-grade**. For real deployments, use TLS.
 
 Blocking is enforced server-side: the admin-managed block list is checked before chat broadcasts and private messages are delivered, so blocked users cannot send either.
 
+### Admin authentication
+
+`/admin <cmd>` is delivered over the same TCP socket as chat traffic, so it needs a shared secret to keep arbitrary clients from issuing kicks or broadcasts. The backend reads `VECTORCOM_ADMIN_TOKEN` from the environment:
+
+```bash
+VECTORCOM_ADMIN_TOKEN=hunter2 make server
+```
+
+When the variable is set, the wire form is `/admin <token> <command>` and mismatches are refused with a generic `Admin authentication failed.` reply. When it is unset, admin-over-socket is **disabled entirely** — the dashboard logs a notice and refuses to send. The stdin admin console on the backend process is always trusted (it is local to the operator running the server).
+
+The Rust dashboard reads the same env var and prepends the token automatically, so the same `make server` invocation works end-to-end as long as the variable is exported in the calling shell.
+
 ## Architecture notes
 
 * **Backend:** TCP sockets, POSIX threads (thread-per-client), `std::mutex`-guarded shared state, graceful shutdown on SIGINT/SIGTERM.
 * **Rust side:** async Tokio I/O, ratatui rendering, auto-reconnect on the client; the dashboard observes the backend, polls it for roster/room state, and relays admin commands to it.
-* The C++ backend frames **one message per `recv`** and XOR-encrypts each `send` from key offset 0, so a client should send messages individually rather than batching many lines into a single TCP segment — which is exactly how the interactive TUI behaves. Under heavy bursts, coalesced segments can garble trailing lines; this is a known limitation of the simple framing.
+* The wire format is **length-prefixed XOR frames** (`[u32 BE len][N XOR bytes]`); each frame is one logical message, and the XOR keystream resets per frame, so TCP segment coalescing is no longer a problem. Maximum frame size is 64 KB.
 
 ## Running on Windows
 

@@ -7,8 +7,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use clap::Parser;
-use shared::{xor_bytes, ClientMessage, ServerMessage, DEFAULT_PORT, DEFAULT_ROOM, MAX_MESSAGE_BYTES};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use shared::{read_frame, write_frame, ClientMessage, ServerMessage, DEFAULT_PORT, DEFAULT_ROOM, MAX_MESSAGE_BYTES};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
@@ -42,8 +41,15 @@ async fn main() -> Result<()> {
         let st = state.clone();
         let name = args.observe_as.clone();
         let up = upstream.clone();
+        // Match the C++ backend's env var; empty means admin-over-socket is
+        // disabled on the backend, which we surface in the activity log when
+        // a command is attempted.
+        let admin_token = std::env::var("VECTORCOM_ADMIN_TOKEN").unwrap_or_default();
+        if admin_token.is_empty() {
+            state.log("VECTORCOM_ADMIN_TOKEN not set: backend will reject /admin".to_string());
+        }
         tokio::spawn(async move {
-            observe_loop(st, up, name, admin_rx).await;
+            observe_loop(st, up, name, admin_rx, admin_token).await;
         });
         let title = format!("observing {}", upstream);
         if args.headless {
@@ -125,14 +131,10 @@ async fn handle_client(stream: TcpStream, state: Arc<ServerState>, peer: String)
     stream.set_nodelay(true).ok();
     let (mut read_half, mut write_half) = stream.into_split();
 
-    let mut name_buf = [0u8; 128];
-    let n = tokio::time::timeout(Duration::from_secs(15), read_half.read(&mut name_buf))
+    let name_payload = tokio::time::timeout(Duration::from_secs(15), read_frame(&mut read_half))
         .await
         .map_err(|_| anyhow::anyhow!("handshake timeout"))??;
-    if n == 0 {
-        anyhow::bail!("empty handshake");
-    }
-    let mut username = String::from_utf8_lossy(&name_buf[..n]).to_string();
+    let mut username = String::from_utf8_lossy(&name_payload).to_string();
     while matches!(username.chars().last(), Some('\n') | Some('\r')) {
         username.pop();
     }
@@ -144,7 +146,7 @@ async fn handle_client(stream: TcpStream, state: Arc<ServerState>, peer: String)
     }
     if let Err(e) = shared::validate_username(&username) {
         let err = wire::render_server(&ServerMessage::Error { text: e.into() });
-        let _ = write_half.write_all(&xor_bytes(err.as_bytes())).await;
+        let _ = write_frame(&mut write_half, err.as_bytes()).await;
         anyhow::bail!("bad username: {}", e);
     }
 
@@ -153,7 +155,7 @@ async fn handle_client(stream: TcpStream, state: Arc<ServerState>, peer: String)
         Ok(id) => id,
         Err(e) => {
             let err = wire::render_server(&ServerMessage::Error { text: e.into() });
-            let _ = write_half.write_all(&xor_bytes(err.as_bytes())).await;
+            let _ = write_frame(&mut write_half, err.as_bytes()).await;
             anyhow::bail!("register failed: {}", e);
         }
     };
@@ -175,7 +177,7 @@ async fn handle_client(stream: TcpStream, state: Arc<ServerState>, peer: String)
     let writer_task = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
             let text = wire::render_server(&msg);
-            if write_half.write_all(&xor_bytes(text.as_bytes())).await.is_err() {
+            if write_frame(&mut write_half, text.as_bytes()).await.is_err() {
                 break;
             }
         }
@@ -194,18 +196,18 @@ async fn read_loop(
     state: Arc<ServerState>,
     id: ClientId,
 ) -> Result<()> {
-    let mut buf = [0u8; 2048];
     loop {
-        let n = read_half.read(&mut buf).await?;
-        if n == 0 {
-            return Ok(());
-        }
-        if n > MAX_MESSAGE_BYTES {
+        let payload = match read_frame(read_half).await {
+            Ok(p) => p,
+            // EOF or framing error → connection closed.
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
+            Err(e) => return Err(e.into()),
+        };
+        if payload.len() > MAX_MESSAGE_BYTES {
             state.send_to(id, ServerMessage::Error { text: "message too large".into() });
             continue;
         }
-        let decrypted = xor_bytes(&buf[..n]);
-        let text = String::from_utf8_lossy(&decrypted).to_string();
+        let text = String::from_utf8_lossy(&payload).to_string();
         for raw in text.split('\n') {
             let line = raw.trim_end_matches('\r').trim();
             if line.is_empty() {
@@ -232,6 +234,7 @@ async fn observe_loop(
     addr: String,
     username: String,
     mut admin_rx: mpsc::Receiver<String>,
+    admin_token: String,
 ) {
     let mut backoff = Duration::from_millis(500);
     loop {
@@ -248,50 +251,57 @@ async fn observe_loop(
         stream.set_nodelay(true).ok();
         backoff = Duration::from_millis(500);
         let (mut r, mut w) = stream.into_split();
-        if w.write_all(username.as_bytes()).await.is_err() {
+        if write_frame(&mut w, username.as_bytes()).await.is_err() {
             state.log("observe: handshake failed".to_string());
             continue;
         }
         state.log(format!("observe: connected to {}", addr));
 
         // Poll the backend for users/rooms so the dashboard panels stay current.
-        // Send one command per tick (alternating) to avoid them coalescing into a
-        // single recv on the backend, which frames one message per read.
+        // Framing guarantees one frame per command, so we can interleave freely.
         let mut refresh = tokio::time::interval(Duration::from_secs(2));
         let mut ask_rooms = false;
         let mut collector = ObserveCollector::new(username.clone());
-        let mut buf = [0u8; 2048];
 
         loop {
             tokio::select! {
                 _ = refresh.tick() => {
                     let cmd = if ask_rooms { "/rooms" } else { "/list" };
                     ask_rooms = !ask_rooms;
-                    if w.write_all(&xor_bytes(cmd.as_bytes())).await.is_err() {
+                    if write_frame(&mut w, cmd.as_bytes()).await.is_err() {
                         break;
                     }
                 }
                 cmd = admin_rx.recv() => {
                     match cmd {
                         Some(c) => {
-                            let wire = format!("/admin {}", c.trim());
-                            if w.write_all(&xor_bytes(wire.as_bytes())).await.is_err() {
+                            let trimmed = c.trim();
+                            if admin_token.is_empty() {
+                                state.log(format!(
+                                    "[admin] refused (set VECTORCOM_ADMIN_TOKEN to enable): {}",
+                                    trimmed
+                                ));
+                                continue;
+                            }
+                            // Wire form: /admin <token> <command>
+                            let wire = format!("/admin {} {}", admin_token, trimmed);
+                            if write_frame(&mut w, wire.as_bytes()).await.is_err() {
                                 break;
                             }
-                            state.log(format!("[admin] sent: {}", c.trim()));
+                            // Never log the token itself.
+                            state.log(format!("[admin] sent: {}", trimmed));
                         }
                         None => return,
                     }
                 }
-                res = r.read(&mut buf) => {
+                res = read_frame(&mut r) => {
                     match res {
-                        Ok(0) | Err(_) => {
+                        Err(_) => {
                             state.log("observe: upstream closed".to_string());
                             break;
                         }
-                        Ok(n) => {
-                            let decrypted = xor_bytes(&buf[..n]);
-                            let text = String::from_utf8_lossy(&decrypted).to_string();
+                        Ok(payload) => {
+                            let text = String::from_utf8_lossy(&payload).to_string();
                             for raw in text.split('\n') {
                                 let line = raw.trim_end_matches('\r');
                                 if line.is_empty() {

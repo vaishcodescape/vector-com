@@ -1,7 +1,6 @@
 use std::time::Duration;
 
-use shared::{xor_bytes, ClientMessage, ServerMessage};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use shared::{read_frame, write_frame, ClientMessage, ServerMessage};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
@@ -39,7 +38,7 @@ pub async fn run(
 
         let (mut read_half, mut write_half) = stream.into_split();
 
-        if write_half.write_all(username.as_bytes()).await.is_err() {
+        if write_frame(&mut write_half, username.as_bytes()).await.is_err() {
             let _ = status.send(ConnStatus::Reconnecting).await;
             let _ = inbound.send(ServerMessage::Error { text: "username send failed, retrying...".into() }).await;
             continue;
@@ -66,32 +65,29 @@ pub async fn run(
 
         let read_inbound = inbound.clone();
         let read_task = tokio::spawn(async move {
-            let mut buf = [0u8; 2048];
             let mut collector = ListCollector::default();
             loop {
-                match read_half.read(&mut buf).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        let decrypted = xor_bytes(&buf[..n]);
-                        let text = String::from_utf8_lossy(&decrypted).to_string();
-                        for raw in text.split('\n') {
-                            let line = raw.trim_end_matches('\r');
-                            if line.is_empty() {
-                                continue;
-                            }
-                            for msg in collector.feed(line) {
-                                if read_inbound.send(msg).await.is_err() {
-                                    return;
-                                }
-                            }
+                let payload = match read_frame(&mut read_half).await {
+                    Ok(p) => p,
+                    Err(_) => break,
+                };
+                let text = String::from_utf8_lossy(&payload).to_string();
+                for raw in text.split('\n') {
+                    let line = raw.trim_end_matches('\r');
+                    if line.is_empty() {
+                        continue;
+                    }
+                    for msg in collector.feed(line) {
+                        if read_inbound.send(msg).await.is_err() {
+                            return;
                         }
-                        // A `/list` or `/rooms` reply arrives as one block per
-                        // recv; flush it so the structured list is emitted now.
-                        for msg in collector.flush() {
-                            if read_inbound.send(msg).await.is_err() {
-                                return;
-                            }
-                        }
+                    }
+                }
+                // A `/list` or `/rooms` reply arrives as one frame; flush so
+                // the structured list is emitted before the next frame.
+                for msg in collector.flush() {
+                    if read_inbound.send(msg).await.is_err() {
+                        return;
                     }
                 }
             }
@@ -103,8 +99,7 @@ pub async fn run(
                     let Some(msg) = msg else { return; };
                     let quit = matches!(msg, ClientMessage::Quit);
                     let Some(wire) = render_outbound(&msg) else { continue; };
-                    let encrypted = xor_bytes(wire.as_bytes());
-                    if write_half.write_all(&encrypted).await.is_err() {
+                    if write_frame(&mut write_half, wire.as_bytes()).await.is_err() {
                         break;
                     }
                     if quit {
