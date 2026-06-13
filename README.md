@@ -20,7 +20,7 @@ make server PORT=9090
 make client HOST=192.168.1.10 PORT=9090 USER=cracked dev
 ```
 
-`make server` runs the C++ backend headless in the background and attaches the Rust dashboard to it as the live UI; when you quit the dashboard, the backend is stopped.
+`make server` runs the C++ backend headless in the background and attaches the Rust dashboard to it as the live UI when you quit the dashboard, the backend is stopped.
 
 ### Prerequisites
 
