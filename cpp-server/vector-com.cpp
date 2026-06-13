@@ -56,8 +56,12 @@ struct ClientInfo
     string addr;
     string room = "general";
 
-    chrono::steady_clock::time_point lastMsgTime = chrono::steady_clock::now();
+    // Rate limit: rolling 1-second window starting at rateWindowStart.
+    chrono::steady_clock::time_point rateWindowStart = chrono::steady_clock::now();
     int msgCount = 0;
+    // Slowmode: timestamp of the last accepted broadcast message in the current
+    // room. Tracked separately so the rate-limit window can't reset it.
+    chrono::steady_clock::time_point lastBroadcastTime{};
     ClientInfo(int s, const string &n, const string &a, const string &r)
         : socket(s), name(n), addr(a), room(r) {}
 };
@@ -72,10 +76,16 @@ private:
     bool running;
     unordered_map<string, int> roomSlowmodeSeconds; // seconds per room
     unordered_set<string> blockedUsers; // admin-managed: blocked users cannot send messages
+    // Shared secret for `/admin` over the socket. Read from the
+    // VECTORCOM_ADMIN_TOKEN env var at startup; empty disables admin-over-wire.
+    string adminToken;
 
 public:
     ChatServer(int port) : port(port), running(false)
     {
+        if (const char* tok = getenv("VECTORCOM_ADMIN_TOKEN"))
+            adminToken = tok;
+
         serverSocket = socket(AF_INET, SOCK_STREAM, 0);
         if (serverSocket < 0)
             throw runtime_error("Failed to create socket");
@@ -109,6 +119,10 @@ public:
 
         cout << "vectorcom server listening on port " << port << endl;
         cout << "admin commands available: type 'help' for options" << endl;
+        if (adminToken.empty())
+            cout << "admin-over-socket DISABLED (set VECTORCOM_ADMIN_TOKEN to enable)" << endl;
+        else
+            cout << "admin-over-socket enabled (token via VECTORCOM_ADMIN_TOKEN)" << endl;
 
         thread(&ChatServer::adminConsole, this).detach();
 
@@ -132,30 +146,84 @@ public:
     {
         running = false;
         if (serverSocket >= 0)
-            close(serverSocket);
+        {
+            // Make accept() return immediately; the listener fd is owned by
+            // start()'s thread and will be closed there or in the destructor.
+            shutdown(serverSocket, SHUT_RDWR);
+        }
+        // Signal each client's owning thread to wake from recv(). The owners
+        // (handleClient) close the fds and remove their entries — closing here
+        // would race with their recv() and risk closing a reused fd.
         lock_guard<mutex> lock(clientsMutex);
         for (auto &c : clients)
-            close(c.socket);
-        clients.clear();
+            shutdown(c.socket, SHUT_RDWR);
     }
 
 private:
+    // Hard cap on a single framed payload: must match shared::MAX_FRAME_BYTES on
+    // the Rust side. The XOR transport isn't authenticated, so a corrupt or
+    // hostile peer could otherwise convince us to allocate gigabytes.
+    static constexpr size_t MAX_FRAME_BYTES = 64 * 1024;
+
+    // Wire format: [u32 big-endian length][N bytes XOR-encrypted payload].
+    // The length prefix is plaintext so the receiver can always find frame
+    // boundaries; the XOR offset resets per frame, so TCP segment coalescing
+    // no longer desyncs the keystream.
     static bool sendAll(int sock, const char* data, size_t len)
     {
-        // Encrypt before sending
-        string plaintext(data, len);
-        string encrypted = Encryption::encrypt(plaintext);
-        
+        if (len > MAX_FRAME_BYTES) return false;
+
+        string encrypted = Encryption::encrypt(string(data, len));
+
+        uint8_t header[4];
+        uint32_t lenBe = static_cast<uint32_t>(len);
+        header[0] = (lenBe >> 24) & 0xFF;
+        header[1] = (lenBe >> 16) & 0xFF;
+        header[2] = (lenBe >> 8) & 0xFF;
+        header[3] = lenBe & 0xFF;
+
+        // One contiguous buffer keeps the prefix and body together — both for
+        // efficiency and so a write failure between them can't leave a peer
+        // mid-frame with no recovery path.
+        string frame;
+        frame.reserve(4 + encrypted.size());
+        frame.append(reinterpret_cast<const char*>(header), 4);
+        frame.append(encrypted);
+
         size_t totalSent = 0;
-        const char* encData = encrypted.c_str();
-        size_t encLen = encrypted.length();
-        
-        while (totalSent < encLen)
+        while (totalSent < frame.size())
         {
-            ssize_t n = send(sock, encData + totalSent, encLen - totalSent, 0);
+            ssize_t n = send(sock, frame.data() + totalSent, frame.size() - totalSent, 0);
             if (n <= 0) return false;
             totalSent += static_cast<size_t>(n);
         }
+        return true;
+    }
+
+    static bool recvN(int sock, char* buf, size_t n)
+    {
+        size_t got = 0;
+        while (got < n)
+        {
+            ssize_t r = recv(sock, buf + got, n - got, 0);
+            if (r <= 0) return false;
+            got += static_cast<size_t>(r);
+        }
+        return true;
+    }
+
+    // Read one frame. Returns false on EOF or framing error; sets `payload` to
+    // the decrypted body.
+    static bool recvFrame(int sock, string &payload)
+    {
+        uint8_t header[4];
+        if (!recvN(sock, reinterpret_cast<char*>(header), 4)) return false;
+        uint32_t len = (uint32_t(header[0]) << 24) | (uint32_t(header[1]) << 16)
+                     | (uint32_t(header[2]) << 8)  |  uint32_t(header[3]);
+        if (len > MAX_FRAME_BYTES) return false;
+        vector<char> buf(len);
+        if (len > 0 && !recvN(sock, buf.data(), len)) return false;
+        payload = Encryption::decrypt(string(buf.data(), buf.size()));
         return true;
     }
 
@@ -295,19 +363,17 @@ private:
             if (c.socket == clientSocket)
             {
                 auto now = chrono::steady_clock::now();
-                auto diff = chrono::duration_cast<chrono::milliseconds>(now - c.lastMsgTime).count();
+                auto diff = chrono::duration_cast<chrono::milliseconds>(now - c.rateWindowStart).count();
 
                 if (diff > 1000)
                 {
                     c.msgCount = 0;
-                    c.lastMsgTime = now;
+                    c.rateWindowStart = now;
                 }
 
                 c.msgCount++;
 
-                if (c.msgCount > 3)
-                    return true;
-                return false;
+                return c.msgCount > 3;
             }
         }
         return false;
@@ -315,22 +381,18 @@ private:
 
     void handleClient(int clientSocket, string addrStr)
     {
-        const int USERNAME_MAX = 64;
-        char nameBuf[USERNAME_MAX]{};
-        ssize_t r = recv(clientSocket, nameBuf, sizeof(nameBuf) - 1, 0);
-        if (r <= 0)
+        string username;
+        if (!recvFrame(clientSocket, username))
         {
             close(clientSocket);
             return;
         }
 
-        nameBuf[USERNAME_MAX - 1] = '\0'; // Ensure null termination
-        string username(nameBuf);
         while (!username.empty() && (username.back() == '\n' || username.back() == '\r'))
             username.pop_back();
         if (username.empty())
             username = "Anonymous";
-        
+
         // Truncate username if too long (safety check)
         if (username.length() > 63)
             username = username.substr(0, 63);
@@ -346,27 +408,21 @@ private:
         saveMessage("general", joinMsg);
         sendRoomHistory(clientSocket, "general");
 
-        char buffer[1024];
         while (running)
         {
-            memset(buffer, 0, sizeof(buffer));
-            ssize_t bytes = recv(clientSocket, buffer, sizeof(buffer) - 1, 0);
-
-            if (bytes <= 0)
+            string msg;
+            if (!recvFrame(clientSocket, msg))
             {
+                string leftRoom = getClientRoom(clientSocket);
                 close(clientSocket);
                 removeClient(clientSocket);
                 string leftMsg = "[" + nowTimestamp() + "] " + username + " left the chat";
                 cout << leftMsg << endl;
-                broadcastMessage(leftMsg, -1, "general");
-                saveMessage("general", leftMsg);
+                broadcastMessage(leftMsg, -1, leftRoom);
+                saveMessage(leftRoom, leftMsg);
                 break;
             }
 
-            // Decrypt received message
-            string encrypted(buffer, buffer + bytes);
-            string msg = Encryption::decrypt(encrypted);
-            
             while (!msg.empty() && (msg.back() == '\n' || msg.back() == '\r'))
                 msg.pop_back();
             if (msg.empty())
@@ -424,8 +480,16 @@ private:
             if (msg.rfind("/join ", 0) == 0)
             {
                 string newRoom = msg.substr(6);
+                while (!newRoom.empty() && isspace(static_cast<unsigned char>(newRoom.front())))
+                    newRoom.erase(newRoom.begin());
+                while (!newRoom.empty() && isspace(static_cast<unsigned char>(newRoom.back())))
+                    newRoom.pop_back();
                 if (newRoom.empty())
-                    newRoom = "general";
+                {
+                    string err = "Usage: /join <room>\n";
+                    sendAll(clientSocket, err.c_str(), err.size());
+                    continue;
+                }
 
                 string oldRoom;
 
@@ -611,15 +675,16 @@ private:
                             if (c.socket == clientSocket)
                             {
                                 auto now = chrono::steady_clock::now();
-                                auto diff = chrono::duration_cast<chrono::seconds>(now - c.lastMsgTime).count();
-                                if (diff < slowSeconds)
+                                // Zero-init means "never sent"; any positive
+                                // slowmode then allows the first message.
+                                if (c.lastBroadcastTime.time_since_epoch().count() != 0)
                                 {
-                                    blocked = true;
-                                    remaining = slowSeconds - diff;
-                                }
-                                else
-                                {
-                                    c.lastMsgTime = now; // reuse existing timestamp for slowmode window
+                                    auto diff = chrono::duration_cast<chrono::seconds>(now - c.lastBroadcastTime).count();
+                                    if (diff < slowSeconds)
+                                    {
+                                        blocked = true;
+                                        remaining = slowSeconds - diff;
+                                    }
                                 }
                                 break;
                             }
@@ -646,8 +711,20 @@ private:
 
             string formatted = "[" + nowTimestamp() + "] " + username + ": " + msg;
             cout << formatted << endl;
-            broadcastMessage(formatted, clientSocket, getClientRoom(clientSocket));
-            saveMessage(getClientRoom(clientSocket), formatted);
+            string clientRoom = getClientRoom(clientSocket);
+            {
+                lock_guard<mutex> lock(clientsMutex);
+                for (auto &c : clients)
+                {
+                    if (c.socket == clientSocket)
+                    {
+                        c.lastBroadcastTime = chrono::steady_clock::now();
+                        break;
+                    }
+                }
+            }
+            broadcastMessage(formatted, clientSocket, clientRoom);
+            saveMessage(clientRoom, formatted);
         }
     }
 
@@ -695,24 +772,28 @@ private:
 
     void broadcastMessage(const string &message, int senderSocket, const string &room)
     {
-        lock_guard<mutex> lock(clientsMutex);
-
-        for (auto it = clients.begin(); it != clients.end();)
+        // Snapshot recipient fds under the lock so we don't hold the mutex
+        // across send() — a slow consumer would otherwise stall the server.
+        vector<int> recipients;
         {
-            // An empty room means "all rooms" (admin broadcasts).
-            if ((room.empty() || it->room == room) && it->socket != senderSocket)
+            lock_guard<mutex> lock(clientsMutex);
+            recipients.reserve(clients.size());
+            for (auto &c : clients)
             {
-                // Message + newline in one send so they stay one XOR unit.
-                string framed = message + "\n";
-                bool ok = sendAll(it->socket, framed.c_str(), framed.size());
-                if (!ok)
-                {
-                    close(it->socket);
-                    it = clients.erase(it);
-                    continue;
-                }
+                // An empty room means "all rooms" (admin broadcasts).
+                if ((room.empty() || c.room == room) && c.socket != senderSocket)
+                    recipients.push_back(c.socket);
             }
-            ++it;
+        }
+
+        string framed = message + "\n";
+        for (int fd : recipients)
+        {
+            if (!sendAll(fd, framed.c_str(), framed.size()))
+            {
+                // Owner thread (handleClient) sees EOF and removes the entry.
+                shutdown(fd, SHUT_RDWR);
+            }
         }
     }
 
@@ -727,12 +808,43 @@ private:
 
     // Execute an admin command (kick/say/slowmode) received over the socket and
     // reply to the requester. Shares behaviour with the stdin admin console.
-    void handleAdminCommand(const string &cmd, int requesterSocket, const string &requester)
+    //
+    // Authentication: when VECTORCOM_ADMIN_TOKEN is set, the wire form is
+    //   /admin <token> <command...>
+    // and the leading token must match. When it is empty, admin-over-socket
+    // is refused entirely. The stdin console is always trusted because it is
+    // local to the operator running the process.
+    void handleAdminCommand(const string &fullCmd, int requesterSocket, const string &requester)
     {
         auto reply = [&](const string &s) {
             string m = s + "\n";
             sendAll(requesterSocket, m.c_str(), m.size());
         };
+
+        if (adminToken.empty())
+        {
+            reply("Admin over socket is disabled on this server.");
+            cout << "[admin DENY: disabled] from " << requester << endl;
+            return;
+        }
+
+        // Strip the leading token. We deliberately don't echo the token or any
+        // hint about its length in the reply or the log.
+        size_t sp = fullCmd.find(' ');
+        if (sp == string::npos)
+        {
+            reply("Admin command requires authentication.");
+            cout << "[admin DENY: missing token] from " << requester << endl;
+            return;
+        }
+        string presented = fullCmd.substr(0, sp);
+        if (presented != adminToken)
+        {
+            reply("Admin authentication failed.");
+            cout << "[admin DENY: bad token] from " << requester << endl;
+            return;
+        }
+        string cmd = fullCmd.substr(sp + 1);
 
         if (cmd.rfind("kick ", 0) == 0)
         {
@@ -809,20 +921,33 @@ private:
 
     void kickUser(const string &username)
     {
-        lock_guard<mutex> lock(clientsMutex);
-        for (auto it = clients.begin(); it != clients.end(); ++it)
+        int targetFd = -1;
         {
-            if (it->name == username)
+            lock_guard<mutex> lock(clientsMutex);
+            for (auto &c : clients)
             {
-                string msg = "[SERVER] You have been kicked by admin.\n";
-                send(it->socket, msg.c_str(), msg.size(), 0);
-                close(it->socket);
-                clients.erase(it);
-                cout << "Kicked user: " << username << endl;
-                return;
+                if (c.name == username)
+                {
+                    targetFd = c.socket;
+                    break;
+                }
             }
         }
-        cout << "No such user: " << username << endl;
+        if (targetFd < 0)
+        {
+            cout << "No such user: " << username << endl;
+            return;
+        }
+        // Encrypt the kick notice (every other server frame is XOR-encrypted;
+        // a plaintext send would arrive as garbage on the client).
+        string msg = "[SERVER] You have been kicked by admin.\n";
+        sendAll(targetFd, msg.c_str(), msg.size());
+        // Don't close()/erase here: the owning handleClient thread may still
+        // be in recv() on this fd, and a concurrent close would risk a UAF if
+        // the kernel reuses the descriptor. shutdown() makes recv return 0;
+        // the owner closes and removes the entry.
+        shutdown(targetFd, SHUT_RDWR);
+        cout << "Kicked user: " << username << endl;
     }
 };
 

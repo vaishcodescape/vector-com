@@ -13,6 +13,55 @@ pub fn xor_bytes(data: &[u8]) -> Vec<u8> {
         .collect()
 }
 
+/// Hard upper bound on a single framed payload. Bigger frames are treated as a
+/// protocol error — the wire is XOR-encrypted, not authenticated, so a corrupt
+/// or malicious peer could otherwise convince us to allocate gigabytes.
+pub const MAX_FRAME_BYTES: usize = 64 * 1024;
+
+/// Wire framing: each message is `[u32 big-endian length][N bytes XOR-encrypted
+/// payload]`. The length prefix is unencrypted so the receiver can always find
+/// frame boundaries; the XOR offset resets to zero per frame, so segment
+/// coalescing on TCP no longer desyncs the keystream.
+pub async fn write_frame<W>(w: &mut W, payload: &[u8]) -> std::io::Result<()>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::AsyncWriteExt;
+    if payload.len() > MAX_FRAME_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "frame too large",
+        ));
+    }
+    let len = (payload.len() as u32).to_be_bytes();
+    let encrypted = xor_bytes(payload);
+    // One write_all per frame keeps the length and body together on the wire
+    // (concatenated into one buffer to avoid two syscalls per frame).
+    let mut buf = Vec::with_capacity(4 + encrypted.len());
+    buf.extend_from_slice(&len);
+    buf.extend_from_slice(&encrypted);
+    w.write_all(&buf).await
+}
+
+pub async fn read_frame<R>(r: &mut R) -> std::io::Result<Vec<u8>>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+    let mut len_buf = [0u8; 4];
+    r.read_exact(&mut len_buf).await?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+    if len > MAX_FRAME_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "frame too large",
+        ));
+    }
+    let mut buf = vec![0u8; len];
+    r.read_exact(&mut buf).await?;
+    Ok(xor_bytes(&buf))
+}
+
 /// Header line that precedes a user listing (emitted by both servers in reply
 /// to `/list`). Used to reconstruct structured lists from the text protocol.
 pub const USER_LIST_HEADER: &str = "Online users:";
