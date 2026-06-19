@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="220" height="220" viewBox="0 0 220 220" fill="none">
+  <defs>
+    <linearGradient id="out-v" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FF8A1E"/>
+      <stop offset="1" stop-color="#E1145E"/>
+    </linearGradient>
+    <linearGradient id="out-stroke" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FF8A1E"/>
+      <stop offset="1" stop-color="#E1145E"/>
+    </linearGradient>
+    <clipPath id="out-clip">
+      <rect x="2" y="2" width="216" height="216" rx="24" ry="24"/>
+    </clipPath>
+  </defs>
+  <rect x="2" y="2" width="216" height="216" rx="24" ry="24" fill="#ffffff" stroke="url(#out-stroke)" stroke-width="4"/>
+  <g clip-path="url(#out-clip)">
+    <g stroke="url(#out-stroke)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" fill="none" opacity="0.7">
+      <polyline points="170,38 180,48 170,58"/>
+      <polyline points="158,38 168,48 158,58"/>
+    </g>
+    <path d="M 46 55 L 102 172 L 116 172 L 174 55 L 146 55 L 110 132 L 74 55 Z" fill="url(#out-v)" fill-rule="evenodd"/>
+    <path d="M 116 172 L 116 190 L 136 174 L 124 172 Z" fill="url(#out-v)"/>
+  </g>
+</svg>
