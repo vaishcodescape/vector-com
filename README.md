@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="images/logo-outlined.svg" alt="Vectorcom logo" width="200">
+</p>
+
 # Vectorcom — Multi-Client Communication System
 
 Vectorcom is a multi-client chat system. The networking core is written in C++ all user interface now lives in a modern Rust **TUI** built with [ratatui](https://ratatui.rs/).
