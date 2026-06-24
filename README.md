@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="images/logo-outlined.svg" alt="Vectorcom logo" width="160">
+  <img src="images/logo-outlined.svg" alt="Vectorcom logo" width="140">
 </p>
 
 # Vectorcom — Multi-Client Communication System
